@@ -9,6 +9,64 @@ from typing import Optional, Tuple
 import numpy as np
 import cv2
 
+_FS = False
+
+def _get_screen_size(window_name: str) -> Tuple[int, int]:
+    # พยายามอ่านขนาดหน้าต่าง (ถ้า fullscreen จะเท่าหน้าจอ)
+    try:
+        rect = cv2.getWindowImageRect(window_name)  # (x, y, w, h)
+        if rect and len(rect) == 4:
+            return int(rect[2]), int(rect[3])
+    except Exception:
+        pass
+    # Windows fallback
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+    except Exception:
+        return 1280, 720  # fallback ท้ายสุด
+
+def _imshow_keep_original(win: str, img: np.ndarray, fullscreen: bool):
+    """
+    fullscreen=True: ไม่ scale ภาพ วางกลางจอบนพื้นดำ
+    fullscreen=False: แสดงตามขนาดจริงของภาพ
+    """
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    if fullscreen:
+        cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        scr_w, scr_h = _get_screen_size(win)
+        h, w = img.shape[:2]
+
+        # คำนวณอัตราขยายให้เต็มจอ (รักษาอัตราส่วน)
+        scale = min(scr_w / w, scr_h / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # สร้าง canvas สีดำเต็มจอ
+        if img.ndim == 2:
+            canvas = np.zeros((scr_h, scr_w), dtype=img.dtype)
+        else:
+            canvas = np.zeros((scr_h, scr_w, img.shape[2]), dtype=img.dtype)
+
+        # วางภาพตรงกลาง
+        left = (scr_w - new_w) // 2
+        top = (scr_h - new_h) // 2
+        canvas[top:top+new_h, left:left+new_w] = resized
+
+        cv2.imshow(win, canvas)
+        
+    else:
+        cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        h, w = img.shape[:2]
+        try:
+            cv2.resizeWindow(win, int(w), int(h))
+        except Exception:
+            pass
+        cv2.imshow(win, img)
+        
+
 def stream_frame(jpeg_bytes: Optional[bytes], mode_id: int,
                  window_name: str = "stream") -> Tuple[bool, Optional[str]]:
     """
@@ -32,10 +90,17 @@ def stream_frame(jpeg_bytes: Optional[bytes], mode_id: int,
         img = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # BGR
         if img is None:
             return False, "cv2.imdecode returned None"
+        
+        global _FS
 
-        cv2.imshow(window_name, img)
+        # cv2.imshow(window_name, img)
+        _imshow_keep_original(window_name, img, _FS)
+        
         # หมายเหตุ: ควรเรียก waitKey(1) ทุกเฟรมเพื่ออัปเดตหน้าต่างและ process events
-        cv2.waitKey(1)
+        # cv2.waitKey(1)
+        k = cv2.waitKey(1) & 0xFF
+        if k == ord('f'):
+            _FS = not _FS
         return True, None
     except Exception as e:
         return False, f"decode/display error: {e}"
@@ -89,6 +154,9 @@ class StreamFrame:
     def show(self) -> Tuple[bool, Optional[str]]:
         if self.data is None:
             return False, None  # ยังไม่มีเฟรม
+        
+        if not hasattr(self, 'fullscreen'):
+            self.fullscreen = False
 
         if self.mode_id not in self.SUPPORTED:
             return False, f"Unsupported mode_id={self.mode_id}. Supported: {sorted(self.SUPPORTED)}"
@@ -100,8 +168,12 @@ class StreamFrame:
                 img = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # BGR
                 if img is None:
                     return False, "cv2.imdecode returned None"
-                cv2.imshow(self.window_name, img)
-                cv2.waitKey(1)
+                # cv2.imshow(self.window_name, img)
+                _imshow_keep_original(self.window_name, img, self.fullscreen)
+                # cv2.waitKey(1)
+                _k = cv2.waitKey(1) & 0xFF
+                if _k == ord('f'):
+                    self.fullscreen = not self.fullscreen
                 return True, None
 
             elif self.mode_id == 3:
@@ -113,8 +185,12 @@ class StreamFrame:
                 if arr.size != expected:
                     return False, f"GRAY size mismatch: {arr.size} != {expected}"
                 img = arr.reshape(self.h, self.w)  # 1-channel
-                cv2.imshow(self.window_name, img)
-                cv2.waitKey(1)
+                # cv2.imshow(self.window_name, img)
+                _imshow_keep_original(self.window_name, img, self.fullscreen)
+                # cv2.waitKey(1)
+                _k = cv2.waitKey(1) & 0xFF
+                if _k == ord('f'):
+                    self.fullscreen = not self.fullscreen
                 return True, None
 
             elif self.mode_id == 1:
@@ -127,8 +203,12 @@ class StreamFrame:
                     return False, f"YUV422 size mismatch: {arr.size} != {expected}"
                 yuy2 = arr.reshape(self.h, self.w, 2)
                 img = cv2.cvtColor(yuy2, cv2.COLOR_YUV2BGR_YUY2)
-                cv2.imshow(self.window_name, img)
-                cv2.waitKey(1)
+                # cv2.imshow(self.window_name, img)
+                _imshow_keep_original(self.window_name, img, self.fullscreen)
+                # cv2.waitKey(1)
+                _k = cv2.waitKey(1) & 0xFF
+                if _k == ord('f'):
+                    self.fullscreen = not self.fullscreen                
                 return True, None
             
             elif self.mode_id == 0:
@@ -155,8 +235,12 @@ class StreamFrame:
 
                 # OpenCV ใช้ BGR
                 img = np.dstack((b8, g8, r8))
-                cv2.imshow(self.window_name, img)
-                cv2.waitKey(1)
+                # cv2.imshow(self.window_name, img)
+                _imshow_keep_original(self.window_name, img, self.fullscreen)
+                # cv2.waitKey(1)
+                _k = cv2.waitKey(1) & 0xFF
+                if _k == ord('f'):
+                    self.fullscreen = not self.fullscreen
                 return True, None
 
             else:
